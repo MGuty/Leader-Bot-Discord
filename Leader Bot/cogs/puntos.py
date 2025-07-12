@@ -24,18 +24,13 @@ class Puntos(commands.Cog):
         self.snapshot_ranking_task.cancel()
 
     def _initialize_database(self):
-        """Crea la tabla de la base de datos si no existe."""
         try:
             con = sqlite3.connect(DB_FILE)
             cur = con.cursor()
             cur.execute('''
                 CREATE TABLE IF NOT EXISTS puntuaciones (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    user_id INTEGER NOT NULL,
-                    guild_id INTEGER NOT NULL,
-                    category TEXT NOT NULL,
-                    points INTEGER NOT NULL,
-                    timestamp DATETIME NOT NULL
+                    id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, guild_id INTEGER NOT NULL,
+                    category TEXT NOT NULL, points INTEGER NOT NULL, timestamp DATETIME NOT NULL
                 )
             ''')
             con.commit()
@@ -45,7 +40,6 @@ class Puntos(commands.Cog):
 
     @tasks.loop(hours=24)
     async def snapshot_ranking_task(self):
-        """Toma una instantánea del ranking y la guarda en un archivo JSON."""
         await self.bot.wait_until_ready()
         print(f"[{datetime.now()}] Creando snapshot del ranking...")
         try:
@@ -54,7 +48,6 @@ class Puntos(commands.Cog):
             cur.execute("SELECT user_id, SUM(points) as total_points FROM puntuaciones GROUP BY user_id")
             ranking_data = cur.fetchall()
             con.close()
-
             snapshot = {str(row[0]): row[1] for row in ranking_data}
             with open(SNAPSHOT_FILE, 'w') as f:
                 json.dump(snapshot, f)
@@ -63,20 +56,12 @@ class Puntos(commands.Cog):
             print(f"Error al crear el snapshot del ranking: {e}")
 
     async def add_points(self, interaction_or_payload, user_id: str, amount: int, category: str):
-        """Añade una fila a la base de datos con los puntos otorgados."""
-        if amount == 0:
-            return
-        
         try:
             con = sqlite3.connect(DB_FILE)
             cur = con.cursor()
             guild_id = interaction_or_payload.guild_id
-            
-            cur.execute(
-                "INSERT INTO puntuaciones (user_id, guild_id, category, points, timestamp) VALUES (?, ?, ?, ?, ?)",
-                (int(user_id), guild_id, category, amount, datetime.now(timezone.utc))
-            )
-            
+            cur.execute("INSERT INTO puntuaciones (user_id, guild_id, category, points, timestamp) VALUES (?, ?, ?, ?, ?)",
+                        (int(user_id), guild_id, category, amount, datetime.now(timezone.utc)))
             con.commit()
             con.close()
             print(f"Se registraron {amount} puntos para el usuario {user_id} en la categoría '{category}'.")
@@ -104,24 +89,25 @@ class Puntos(commands.Cog):
         
         full_rank_list_text = []
         for i, (user_id, total_points) in enumerate(current_ranking_data):
-            current_pos = i + 1
-            previous_pos = previous_ranks.get(str(user_id))
-            rank_change_emoji = ""
-            if previous_pos is not None:
-                if current_pos < previous_pos + 1: rank_change_emoji = "⬆️"
-                elif current_pos > previous_pos + 1: rank_change_emoji = "⬇️"
-            else: rank_change_emoji = "🆕"
-            
-            full_rank_list_text.append(f"**{current_pos}.** <@{user_id}> - `{total_points}` puntos {rank_change_emoji}")
-        
+            try:
+                member = await interaction.guild.fetch_member(int(user_id))
+                display_name = member.display_name
+                
+                current_pos = i + 1
+                previous_pos = previous_ranks.get(str(user_id))
+                rank_change_emoji = ""
+                if previous_pos is not None:
+                    if current_pos < previous_pos + 1: rank_change_emoji = "⬆️"
+                    elif current_pos > previous_pos + 1: rank_change_emoji = "⬇️"
+                else: rank_change_emoji = "🆕"
+                
+                full_rank_list_text.append(f"**{current_pos}.** **{display_name}** - `{total_points}` puntos {rank_change_emoji}")
+            except discord.NotFound:
+                full_rank_list_text.append(f"**{current_pos}.** `Usuario Desconocido ({user_id})` - `{total_points}` puntos")
+
         description_text = "\n".join(full_rank_list_text)
-        
         if len(description_text) > 4000:
-            description_text = description_text[:4000]
-            last_newline = description_text.rfind('\n')
-            if last_newline != -1:
-                description_text = description_text[:last_newline]
-            description_text += "\n\n... y más (lista demasiado larga para mostrar completamente)."
+            description_text = description_text[:4000].rsplit('\n', 1)[0] + "\n\n... y más."
 
         embed = discord.Embed(
             title="🏆 Ranking de Puntos Completo 🏆",
@@ -131,11 +117,10 @@ class Puntos(commands.Cog):
         await interaction.followup.send(embed=embed)
 
     @app_commands.command(name="points", description="Añade o resta puntos a un usuario manualmente.")
-    @app_commands.describe(usuario="El usuario al que quieres modificar los puntos.", puntos="La cantidad (negativa para restar).", motivo="La razón del ajuste manual (opcional).")
+    @app_commands.describe(usuario="El usuario a modificar.", puntos="La cantidad (negativa para restar).", motivo="La razón del ajuste.")
     async def manual_points(self, interaction: discord.Interaction, usuario: discord.Member, puntos: int, motivo: str = "Ajuste manual"):
-        # Verificación de rol manual para asegurar que el comando se registre
         if not any(role.id == ADMIN_ROLE_ID for role in interaction.user.roles):
-            return await interaction.response.send_message("❌ No tienes el rol de administrador necesario para usar este comando.", ephemeral=True)
+            return await interaction.response.send_message("❌ No tienes el rol de administrador necesario.", ephemeral=True)
             
         await self.add_points(interaction, str(usuario.id), puntos, 'manual')
         
@@ -152,19 +137,6 @@ class Puntos(commands.Cog):
             await log_channel.send(embed=embed)
             
         await interaction.response.send_message(f"✅ Se han ajustado los puntos de {usuario.mention} en {puntos:+} puntos.", ephemeral=True)
-
-    async def cog_app_command_error(self, interaction: discord.Interaction, error: app_commands.AppCommandError):
-        # Este manejador de errores es para el comando /rank que no tiene chequeo manual
-        # No es estrictamente necesario para /points ya que tiene su propio chequeo, pero es una buena práctica tenerlo
-        if isinstance(error, app_commands.CheckFailure):
-            await interaction.response.send_message("❌ No tienes permiso para usar este comando.", ephemeral=True)
-        else:
-            if not interaction.response.is_done():
-                await interaction.response.send_message("Ocurrió un error inesperado.", ephemeral=True)
-            else:
-                await interaction.followup.send("Ocurrió un error inesperado.", ephemeral=True)
-            print(f"Error en un comando de Puntos por {interaction.user}: {error}")
-            traceback.print_exc()
 
 async def setup(bot):
     await bot.add_cog(Puntos(bot))
